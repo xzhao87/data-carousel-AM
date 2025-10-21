@@ -1,3 +1,11 @@
+import sys
+from pathlib import Path
+
+# Ensure project root is on sys.path so local packages (like DatasetParsing)
+# can be imported when running this file as a script (python scripts/get_prodsyslogs.py).
+project_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project_root))
+
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_gssapi import HTTPSPNEGOAuth, OPTIONAL
 import csv
@@ -54,7 +62,7 @@ class ESDownloader:
                     "must": [
                         {"match_phrase": {"message": "Submit new rule for"}},
                         {"exists": {"field": "dataset"}},
-                        {"range": {"asctime": {"gt": "2022-01-01 00:00:00"}}}
+                        {"range": {"asctime": {"gt": "2025-01-01 00:00:00"}}}
                     ]
                 }
             }
