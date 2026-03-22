@@ -23,7 +23,8 @@ This script:
      Data Carousel analysis
   7. Normalizes selected fields
   8. Parses the dataset column using the repo's local DatasetParsing module
-  9. Writes the result to a CSV file with columns in a controlled order
+  9. Renames selected parser-derived columns for preferred output naming
+ 10. Writes the result to a CSV file with columns in a controlled order
 
 What this script does NOT do
 ----------------------------
@@ -31,9 +32,9 @@ It does NOT access the DEFT Oracle DB and does NOT enrich the CSV with DEFT data
 
 Why request_id is ignored
 -------------------------
-The newer OpenSearch documents include request_id, but per local analysis needs,
-that is an internal PanDA DC DB counter and not the real physics task identifier.
-So this script intentionally ignores request_id.
+The newer OpenSearch documents include request_id, but for this workflow that is
+an internal PanDA DC DB counter and not the real physics task identifier. So
+this script intentionally ignores request_id.
 
 Prerequisites
 -------------
@@ -47,10 +48,6 @@ Prerequisites
       [es_connection]
       eshost = https://os-atlas.cern.ch:443/os
       certpath = /full/path/to/CA-bundle.pem
-
-   Notes:
-   - eshost is the full OpenSearch URL, not just the hostname
-   - this script parses that URL and extracts host / port / URL prefix
 
 5. You have a valid Kerberos ticket before running:
       kinit
@@ -96,6 +93,8 @@ CLI arguments
 --output  Output CSV path. Default:
           <repo>/data/prodsyslogs.csv
 
+--help    Show usage/help text (provided automatically by argparse)
+
 Output CSV columns
 ------------------
 The CSV begins with these columns in this exact order if present:
@@ -112,21 +111,28 @@ The CSV begins with these columns in this exact order if present:
   j) task_group
   k) task_user
   l) ddm_rule_id
-  m) dataset_format
-  n) dataset_format_short
-  o) to_pin   (normalized to 1 if true/True/TRUE, otherwise 0)
-  p) ... all extra fields returned by DatasetParsing, followed by any remaining fields
+  m) scope
+  n) dataset_format
+  o) dataset_format_short
+  p) to_pin
+  q) runNumber/datasetID
+  r) physicsShort/StreamName
+  s) production_step
+  t) dataset_origin
+  u) dataset_category
+  v) versionTag
+  w) amiTag
+  x) tid
+  y) full_tid
+  z) ... any remaining fields
 
 Notes
 -----
-- This script assumes the newer OpenSearch document format where structured
-  fields already exist.
-- Large time ranges may return many records. Restricting the index pattern to
-  specific months can improve performance.
-- The OpenSearch query filters on method.keyword = stage_request. This assumes
-  the keyword subfield exists for method, which is common and consistent with
-  current successful tests. If that ever fails on a different cluster, switch
-  it to a plain-field query on method.
+- The columns year, energy, b_unit, data_format, dataset_format_parser, and
+  dataset_format_short_parser are removed from the final CSV output.
+- parser field dataset_id is renamed to runNumber/datasetID
+- parser field stream_physics is renamed to physicsShort/StreamName
+- scope is placed between ddm_rule_id and dataset_format in the final CSV
 """
 
 from __future__ import annotations
@@ -142,10 +148,6 @@ import pandas as pd
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_gssapi import HTTPSPNEGOAuth, OPTIONAL
 
-# ---------------------------------------------------------------------------
-# Allow importing DatasetParsing from the repo root when this script is run
-# from the scripts/ directory.
-# ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -162,10 +164,10 @@ class DataCarouselLogs:
       - drop transport/log shipping fields
       - normalize fields
       - parse dataset names
+      - rename selected parser fields
       - save to CSV
     """
 
-    # Requested leading columns, in exact order.
     FRONT_COLUMNS = [
         "source_tape",
         "source_rse",
@@ -179,13 +181,21 @@ class DataCarouselLogs:
         "task_group",
         "task_user",
         "ddm_rule_id",
+        "scope",
         "dataset_format",
         "dataset_format_short",
         "to_pin",
+        "runNumber/datasetID",
+        "physicsShort/StreamName",
+        "production_step",
+        "dataset_origin",
+        "dataset_category",
+        "versionTag",
+        "amiTag",
+        "tid",
+        "full_tid",
     ]
 
-    # Columns to remove from the final CSV because they are Filebeat/Logstash
-    # or transport/log plumbing, not useful for the downstream analysis.
     DROP_COLUMNS = [
         "message",
         "event_original",
@@ -205,7 +215,18 @@ class DataCarouselLogs:
         "ecs_version",
         "host_name",
         "logName",
+        "year",
+        "energy",
+        "b_unit",
+        "data_format",
+        "dataset_format_parser",
+        "dataset_format_short_parser",
     ]
+
+    RENAME_COLUMNS = {
+        "dataset_id": "runNumber/datasetID",
+        "stream_physics": "physicsShort/StreamName",
+    }
 
     def __init__(self, config_path: Path | None = None) -> None:
         if config_path is None:
@@ -216,9 +237,6 @@ class DataCarouselLogs:
         self._parse_eshost()
 
     def _read_config(self) -> configparser.ConfigParser:
-        """
-        Read and validate config.ini.
-        """
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
 
@@ -237,10 +255,6 @@ class DataCarouselLogs:
         return config
 
     def _parse_eshost(self) -> None:
-        """
-        Parse a full OpenSearch URL like:
-            https://os-atlas.cern.ch:443/os
-        """
         es_url = self.config["es_connection"]["eshost"]
         parsed = urlparse(es_url)
 
@@ -256,9 +270,6 @@ class DataCarouselLogs:
         self.ca_cert = self.config["es_connection"]["certpath"]
 
     def connect_es(self) -> OpenSearch:
-        """
-        Create and return an OpenSearch client.
-        """
         return OpenSearch(
             hosts=[
                 {
@@ -283,12 +294,6 @@ class DataCarouselLogs:
         parent_key: str = "",
         sep: str = "_",
     ) -> Dict[str, Any]:
-        """
-        Flatten nested dicts into a single-level dict using underscore names.
-
-        Example:
-            {"agent": {"name": "foo"}} -> {"agent_name": "foo"}
-        """
         items: List[tuple[str, Any]] = []
 
         for key, value in nested.items():
@@ -302,17 +307,6 @@ class DataCarouselLogs:
 
     @staticmethod
     def build_query(start: str, end: str) -> Dict[str, Any]:
-        """
-        Build the OpenSearch query.
-
-        Query-side filters:
-          - method = stage_request
-          - ddm_rule_id exists
-          - @timestamp within requested range
-
-        to_pin filtering is intentionally done in Python rather than in the
-        OpenSearch query because we do not want to assume a keyword mapping.
-        """
         return {
             "query": {
                 "bool": {
@@ -341,9 +335,6 @@ class DataCarouselLogs:
         batch_size: int = 5000,
         scroll_keepalive: str = "2m",
     ) -> Iterable[Dict[str, Any]]:
-        """
-        Iterate through the full result set using the OpenSearch scroll API.
-        """
         response = client.search(
             index=index,
             body=query,
@@ -369,12 +360,6 @@ class DataCarouselLogs:
 
     @staticmethod
     def normalize_to_pin(value: Any) -> int:
-        """
-        Normalize to_pin to an integer flag.
-
-        true / True / TRUE / boolean True => 1
-        everything else => 0
-        """
         if isinstance(value, bool):
             return 1 if value else 0
         if value is None:
@@ -383,9 +368,6 @@ class DataCarouselLogs:
 
     @staticmethod
     def ensure_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-        """
-        Ensure required columns exist.
-        """
         for col in columns:
             if col not in df.columns:
                 df[col] = pd.NA
@@ -397,18 +379,6 @@ class DataCarouselLogs:
         end: str = "now",
         index: str = "atlas_datacarousel-*",
     ) -> pd.DataFrame:
-        """
-        Query OpenSearch and return a pandas DataFrame.
-
-        Processing steps:
-          1. fetch matching documents
-          2. flatten nested JSON
-          3. drop records with to_pin=true
-          4. normalize fields
-          5. parse dataset names with DatasetParsing
-          6. drop transport/log shipping columns
-          7. reorder final columns
-        """
         client = self.connect_es()
         query = self.build_query(start, end)
 
@@ -428,17 +398,13 @@ class DataCarouselLogs:
 
         df = pd.DataFrame(records)
 
-        # Make sure requested leading columns exist.
-        df = self.ensure_columns(df, self.FRONT_COLUMNS)
-
-        # Normalize selected fields.
-        df["to_pin"] = df["to_pin"].apply(self.normalize_to_pin)
+        if "to_pin" in df.columns:
+            df["to_pin"] = df["to_pin"].apply(self.normalize_to_pin)
 
         for col in ("total_files", "dataset_size", "task_id"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Parse dataset names and track which columns were added by the parser.
         parser_added_columns: List[str] = []
         if "dataset" in df.columns:
             parser = HEPDatasetParser()
@@ -446,20 +412,27 @@ class DataCarouselLogs:
             df = parser.parse_dataset_column(df, column_name="dataset")
             parser_added_columns = [c for c in df.columns if c not in original_columns]
 
-        # Explicitly ignore request_id.
         if "request_id" in df.columns:
             df = df.drop(columns=["request_id"])
 
-        # Remove filebeat/logstash/plumbing fields from final output.
+        rename_map = {k: v for k, v in self.RENAME_COLUMNS.items() if k in df.columns}
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        parser_added_columns = [self.RENAME_COLUMNS.get(c, c) for c in parser_added_columns]
+
         df = df.drop(columns=[c for c in self.DROP_COLUMNS if c in df.columns], errors="ignore")
 
-        # Final column order:
-        #   1) requested front columns
-        #   2) parser-added columns
-        #   3) everything else
+        # Keep first occurrence only if duplicate names somehow appear.
+        df = df.loc[:, ~df.columns.duplicated()]
+
+        # Create missing final-output columns only at the very end.
+        df = self.ensure_columns(df, self.FRONT_COLUMNS)
+
         front = [c for c in self.FRONT_COLUMNS if c in df.columns]
         parser_cols = [c for c in parser_added_columns if c in df.columns and c not in front]
         rest = [c for c in df.columns if c not in front and c not in parser_cols]
+
         df = df[front + parser_cols + rest]
 
         return df
@@ -471,9 +444,6 @@ class DataCarouselLogs:
         end: str = "now",
         index: str = "atlas_datacarousel-*",
     ) -> None:
-        """
-        Fetch records and write them to CSV.
-        """
         output_csv = Path(output_csv)
         output_csv.parent.mkdir(parents=True, exist_ok=True)
 
@@ -483,9 +453,6 @@ class DataCarouselLogs:
 
 
 def parse_args() -> argparse.Namespace:
-    """
-    Parse command-line arguments.
-    """
     parser = argparse.ArgumentParser(
         description=(
             "Fetch Data Carousel stage_request records from OpenSearch and write them to CSV. "
@@ -530,3 +497,4 @@ if __name__ == "__main__":
         end=args.end,
         index=args.index,
     )
+

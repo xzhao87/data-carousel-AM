@@ -48,9 +48,6 @@ class HEPDatasetParser:
         )
 
     def parse_scope(self, scope: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse the dataset scope into structured components.
-        """
         parsed = {
             "scope": scope,
             "dataset_origin": None,
@@ -85,9 +82,6 @@ class HEPDatasetParser:
 
     @staticmethod
     def make_dataset_format_short(dataset_format: Optional[str]) -> Optional[str]:
-        """
-        Derive a coarse grouping label from the exact dataset format.
-        """
         if not dataset_format:
             return None
 
@@ -99,20 +93,6 @@ class HEPDatasetParser:
 
     @staticmethod
     def split_version_tag(version_tag: Optional[str]) -> Dict[str, Optional[str]]:
-        """
-        Split a version tag into:
-          - amiTag
-          - tid
-          - full_tid
-
-        Example:
-          e7142_e5984_tid23108064_00
-
-        becomes:
-          amiTag   = e7142_e5984
-          tid      = 23108064
-          full_tid = tid23108064_00
-        """
         result = {
             "amiTag": None,
             "tid": None,
@@ -135,12 +115,6 @@ class HEPDatasetParser:
         return result
 
     def parse_full_dataset_name(self, dataset_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse a full dataset name into structured components.
-
-        Expected ATLAS-like pattern:
-          scope:name.id.physics_or_stream.prod_step.data_format.versionTag
-        """
         parts = dataset_name.split(":")
         scope = parts[0] if len(parts) == 2 else dataset_name.split(".")[0]
 
@@ -184,12 +158,6 @@ class HEPDatasetParser:
         return parsed
 
     def parse_dataset_column(self, df: pd.DataFrame, column_name: str = "dataset") -> pd.DataFrame:
-        """
-        Parse a dataframe column containing dataset names.
-
-        If parser-generated columns would duplicate existing dataframe columns,
-        keep the original dataframe columns and drop the duplicates from parser output.
-        """
         parsed_df = df[column_name].apply(self.parse_full_dataset_name).apply(pd.Series)
 
         if parsed_df.empty:
@@ -199,3 +167,4 @@ class HEPDatasetParser:
         parsed_df = parsed_df.drop(columns=duplicate_cols, errors="ignore")
 
         return pd.concat([df, parsed_df], axis=1)
+
