@@ -19,9 +19,11 @@ This script:
        - this filtering is done in Python, not in the OpenSearch query,
          because we do not assume a to_pin.keyword mapping exists
   5. Flattens nested JSON documents into a tabular structure
-  6. Normalizes selected fields
-  7. Parses the dataset column using the repo's local DatasetParsing module
-  8. Writes the result to a CSV file with columns in a controlled order
+  6. Removes Filebeat / Logstash / transport-related columns not useful for
+     Data Carousel analysis
+  7. Normalizes selected fields
+  8. Parses the dataset column using the repo's local DatasetParsing module
+  9. Writes the result to a CSV file with columns in a controlled order
 
 What this script does NOT do
 ----------------------------
@@ -29,9 +31,9 @@ It does NOT access the DEFT Oracle DB and does NOT enrich the CSV with DEFT data
 
 Why request_id is ignored
 -------------------------
-The newer OpenSearch documents include request_id, but per your note, that is an
-internal PanDA DC DB counter and not the real physics task identifier. So this
-script intentionally ignores request_id.
+The newer OpenSearch documents include request_id, but per local analysis needs,
+that is an internal PanDA DC DB counter and not the real physics task identifier.
+So this script intentionally ignores request_id.
 
 Prerequisites
 -------------
@@ -123,8 +125,8 @@ Notes
   specific months can improve performance.
 - The OpenSearch query filters on method.keyword = stage_request. This assumes
   the keyword subfield exists for method, which is common and consistent with
-  your successful tests. If that ever fails on a different cluster, you can
-  switch it to a plain field query on method instead.
+  current successful tests. If that ever fails on a different cluster, switch
+  it to a plain-field query on method.
 """
 
 from __future__ import annotations
@@ -140,18 +142,10 @@ import pandas as pd
 from opensearchpy import OpenSearch, RequestsHttpConnection
 from requests_gssapi import HTTPSPNEGOAuth, OPTIONAL
 
-# -----------------------------------------------------------------------------
-# Make the repo root importable so this script can use the local DatasetParsing
-# module when run from scripts/.
-#
-# Example repo layout:
-#   data-carousel/
-#     config.ini
-#     DatasetParsing/
-#       hep_dataset_parser.py
-#     scripts/
-#       fetch_datacarousel_csv.py
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Allow importing DatasetParsing from the repo root when this script is run
+# from the scripts/ directory.
+# ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -165,12 +159,13 @@ class DataCarouselLogs:
       - connect to OpenSearch
       - query records
       - flatten JSON
+      - drop transport/log shipping fields
       - normalize fields
       - parse dataset names
       - save to CSV
     """
 
-    # These are the required front columns in the exact order requested.
+    # Requested leading columns, in exact order.
     FRONT_COLUMNS = [
         "source_tape",
         "source_rse",
@@ -189,13 +184,30 @@ class DataCarouselLogs:
         "to_pin",
     ]
 
-    def __init__(self, config_path: Path | None = None) -> None:
-        """
-        Initialize the object and load config.ini.
+    # Columns to remove from the final CSV because they are Filebeat/Logstash
+    # or transport/log plumbing, not useful for the downstream analysis.
+    DROP_COLUMNS = [
+        "message",
+        "event_original",
+        "input_type",
+        "logLevel",
+        "@version",
+        "agent_id",
+        "agent_version",
+        "agent_ephemeral_id",
+        "agent_name",
+        "agent_type",
+        "tags",
+        "@timestamp",
+        "fields_type",
+        "log_file_path",
+        "log_offset",
+        "ecs_version",
+        "host_name",
+        "logName",
+    ]
 
-        If config_path is not provided, use:
-            <repo_root>/config.ini
-        """
+    def __init__(self, config_path: Path | None = None) -> None:
         if config_path is None:
             config_path = REPO_ROOT / "config.ini"
 
@@ -206,11 +218,6 @@ class DataCarouselLogs:
     def _read_config(self) -> configparser.ConfigParser:
         """
         Read and validate config.ini.
-
-        Required section and keys:
-            [es_connection]
-            eshost
-            certpath
         """
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
@@ -231,16 +238,8 @@ class DataCarouselLogs:
 
     def _parse_eshost(self) -> None:
         """
-        Parse full OpenSearch URL from config.ini.
-
-        Expected format:
+        Parse a full OpenSearch URL like:
             https://os-atlas.cern.ch:443/os
-
-        After parsing:
-            self.host       -> os-atlas.cern.ch
-            self.port       -> 443
-            self.url_prefix -> os
-            self.ca_cert    -> path from certpath
         """
         es_url = self.config["es_connection"]["eshost"]
         parsed = urlparse(es_url)
@@ -259,11 +258,6 @@ class DataCarouselLogs:
     def connect_es(self) -> OpenSearch:
         """
         Create and return an OpenSearch client.
-
-        Assumptions:
-          - OpenSearch is reachable via the full URL from config.ini
-          - Auth is done via Kerberos / SPNEGO
-          - SSL verification uses the configured CA bundle
         """
         return OpenSearch(
             hosts=[
@@ -290,15 +284,10 @@ class DataCarouselLogs:
         sep: str = "_",
     ) -> Dict[str, Any]:
         """
-        Flatten a nested dictionary into a single-level dictionary.
+        Flatten nested dicts into a single-level dict using underscore names.
 
         Example:
-            {"agent": {"name": "foo", "id": 123}}
-        becomes:
-            {"agent_name": "foo", "agent_id": 123}
-
-        This is helpful because OpenSearch documents often contain nested fields,
-        but CSV output needs a flat table.
+            {"agent": {"name": "foo"}} -> {"agent_name": "foo"}
         """
         items: List[tuple[str, Any]] = []
 
@@ -319,12 +308,10 @@ class DataCarouselLogs:
         Query-side filters:
           - method = stage_request
           - ddm_rule_id exists
-          - @timestamp is within the requested range
+          - @timestamp within requested range
 
-        Important:
-          We do NOT filter to_pin here, because we do not want to assume the
-          existence of a to_pin.keyword field in the OpenSearch mapping.
-          Instead, to_pin filtering is done later in Python.
+        to_pin filtering is intentionally done in Python rather than in the
+        OpenSearch query because we do not want to assume a keyword mapping.
         """
         return {
             "query": {
@@ -355,12 +342,7 @@ class DataCarouselLogs:
         scroll_keepalive: str = "2m",
     ) -> Iterable[Dict[str, Any]]:
         """
-        Iterate through all search results using the OpenSearch scroll API.
-
-        Why scroll?
-        ----------
-        A normal search only returns a limited number of records. For large data
-        collections, scroll lets us retrieve the whole result set batch by batch.
+        Iterate through the full result set using the OpenSearch scroll API.
         """
         response = client.search(
             index=index,
@@ -383,7 +365,6 @@ class DataCarouselLogs:
                 try:
                     client.clear_scroll(scroll_id=scroll_id)
                 except Exception:
-                    # Not fatal if cleanup fails
                     pass
 
     @staticmethod
@@ -391,9 +372,8 @@ class DataCarouselLogs:
         """
         Normalize to_pin to an integer flag.
 
-        Rule:
-          - if value is true / True / TRUE (or boolean True), return 1
-          - otherwise return 0
+        true / True / TRUE / boolean True => 1
+        everything else => 0
         """
         if isinstance(value, bool):
             return 1 if value else 0
@@ -404,8 +384,7 @@ class DataCarouselLogs:
     @staticmethod
     def ensure_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
         """
-        Ensure all required columns exist in the DataFrame.
-        Missing columns are created with pandas NA.
+        Ensure required columns exist.
         """
         for col in columns:
             if col not in df.columns:
@@ -419,17 +398,16 @@ class DataCarouselLogs:
         index: str = "atlas_datacarousel-*",
     ) -> pd.DataFrame:
         """
-        Query OpenSearch and return the result as a pandas DataFrame.
+        Query OpenSearch and return a pandas DataFrame.
 
-        Steps:
-          1. connect to OpenSearch
-          2. build query
-          3. scroll through all hits
-          4. flatten nested JSON
-          5. filter out records where to_pin is true
-          6. normalize fields
-          7. parse dataset column using HEPDatasetParser
-          8. reorder columns
+        Processing steps:
+          1. fetch matching documents
+          2. flatten nested JSON
+          3. drop records with to_pin=true
+          4. normalize fields
+          5. parse dataset names with DatasetParsing
+          6. drop transport/log shipping columns
+          7. reorder final columns
         """
         client = self.connect_es()
         query = self.build_query(start, end)
@@ -439,8 +417,6 @@ class DataCarouselLogs:
         for hit in self.scroll_search(client, index=index, query=query):
             source = hit.get("_source", {})
 
-            # Python-level filtering for to_pin:
-            # keep only records where to_pin is not true/True/TRUE.
             if self.normalize_to_pin(source.get("to_pin")) == 1:
                 continue
 
@@ -452,20 +428,17 @@ class DataCarouselLogs:
 
         df = pd.DataFrame(records)
 
-        # Ensure the required front columns exist even if missing in some docs.
+        # Make sure requested leading columns exist.
         df = self.ensure_columns(df, self.FRONT_COLUMNS)
 
-        # Normalize to_pin into 0 / 1 as requested.
+        # Normalize selected fields.
         df["to_pin"] = df["to_pin"].apply(self.normalize_to_pin)
 
-        # Convert numeric-looking fields to numbers where possible.
         for col in ("total_files", "dataset_size", "task_id"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        # Parse dataset names using the repo's local DatasetParsing module.
-        # Track which columns are newly added by the parser so we can place them
-        # immediately after the requested front columns.
+        # Parse dataset names and track which columns were added by the parser.
         parser_added_columns: List[str] = []
         if "dataset" in df.columns:
             parser = HEPDatasetParser()
@@ -473,18 +446,20 @@ class DataCarouselLogs:
             df = parser.parse_dataset_column(df, column_name="dataset")
             parser_added_columns = [c for c in df.columns if c not in original_columns]
 
-        # Explicitly drop request_id per requirement.
+        # Explicitly ignore request_id.
         if "request_id" in df.columns:
             df = df.drop(columns=["request_id"])
 
-        # Final column order:
-        #  1) requested front columns
-        #  2) parser-added columns
-        #  3) any remaining columns
-        front = [c for c in self.FRONT_COLUMNS if c in df.columns]
-        parser_cols = [c for c in parser_added_columns if c not in front]
-        rest = [c for c in df.columns if c not in front and c not in parser_cols]
+        # Remove filebeat/logstash/plumbing fields from final output.
+        df = df.drop(columns=[c for c in self.DROP_COLUMNS if c in df.columns], errors="ignore")
 
+        # Final column order:
+        #   1) requested front columns
+        #   2) parser-added columns
+        #   3) everything else
+        front = [c for c in self.FRONT_COLUMNS if c in df.columns]
+        parser_cols = [c for c in parser_added_columns if c in df.columns and c not in front]
+        rest = [c for c in df.columns if c not in front and c not in parser_cols]
         df = df[front + parser_cols + rest]
 
         return df
@@ -498,17 +473,6 @@ class DataCarouselLogs:
     ) -> None:
         """
         Fetch records and write them to CSV.
-
-        Parameters
-        ----------
-        output_csv : str or Path
-            Destination CSV path.
-        start : str
-            Start time, inclusive.
-        end : str
-            End time, inclusive. Can be an ISO timestamp or "now".
-        index : str
-            OpenSearch index pattern.
         """
         output_csv = Path(output_csv)
         output_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -521,24 +485,6 @@ class DataCarouselLogs:
 def parse_args() -> argparse.Namespace:
     """
     Parse command-line arguments.
-
-    Examples
-    --------
-    Default:
-        python scripts/fetch_datacarousel_csv.py
-
-    Explicit time range:
-        python scripts/fetch_datacarousel_csv.py \
-            --start 2025-09-01T00:00:00Z \
-            --end 2026-03-20T23:59:59Z
-
-    Explicit output file:
-        python scripts/fetch_datacarousel_csv.py \
-            --output data/custom.csv
-
-    Narrow index selection:
-        python scripts/fetch_datacarousel_csv.py \
-            --index "atlas_datacarousel-2026.01,atlas_datacarousel-2026.02"
     """
     parser = argparse.ArgumentParser(
         description=(
@@ -550,28 +496,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--start",
         default="2025-09-01T00:00:00Z",
-        help=(
-            "Start timestamp, inclusive, in ISO format. "
-            "Example: 2025-09-01T00:00:00Z"
-        ),
+        help="Start timestamp, inclusive, in ISO format.",
     )
 
     parser.add_argument(
         "--end",
         default="now",
-        help=(
-            "End timestamp, inclusive, in ISO format or 'now'. "
-            "Example: 2026-03-20T23:59:59Z"
-        ),
+        help="End timestamp, inclusive, in ISO format or 'now'.",
     )
 
     parser.add_argument(
         "--index",
         default="atlas_datacarousel-*",
-        help=(
-            "OpenSearch index pattern. "
-            "Example: atlas_datacarousel-* or atlas_datacarousel-2026.03"
-        ),
+        help="OpenSearch index pattern.",
     )
 
     parser.add_argument(
@@ -593,4 +530,3 @@ if __name__ == "__main__":
         end=args.end,
         index=args.index,
     )
-
