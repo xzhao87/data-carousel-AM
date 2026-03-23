@@ -2,15 +2,19 @@
 """
 fill_missing_dataset_fields.py
 
-Fix ONLY these columns if missing:
+Fix ONLY these columns:
   - scope
   - dataset_format
   - dataset_format_short
+  - task_type normalization
 
 Rules:
   - Do NOT modify any other columns
   - Do NOT convert "None" to empty
   - Only fill values when missing (empty or NaN)
+  - Normalize task_type:
+        prod  -> production
+        anal  -> analysis
 
 Usage:
   python tools/fill_missing_dataset_fields.py \
@@ -36,6 +40,7 @@ def is_missing(value) -> bool:
     Treat as missing only if:
       - NaN
       - empty string
+
     BUT NOT the string "None"
     """
     if pd.isna(value):
@@ -83,37 +88,57 @@ def parse_dataset(dataset: str) -> Tuple[Optional[str], Optional[str], Optional[
     return scope, fmt, fmt_short
 
 
+def normalize_task_type(value: str) -> str:
+    """
+    Normalize task_type without touching other values.
+    """
+    if value == "prod":
+        return "production"
+    if value == "anal":
+        return "analysis"
+    return value
+
+
 def fill(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     rows_updated = 0
 
     for idx in df.index:
-        dataset = df.at[idx, "dataset"] if "dataset" in df.columns else None
-
-        if not isinstance(dataset, str):
-            continue
-
-        scope_missing = is_missing(df.at[idx, "scope"]) if "scope" in df.columns else False
-        fmt_missing = is_missing(df.at[idx, "dataset_format"]) if "dataset_format" in df.columns else False
-        fmt_short_missing = is_missing(df.at[idx, "dataset_format_short"]) if "dataset_format_short" in df.columns else False
-
-        if not (scope_missing or fmt_missing or fmt_short_missing):
-            continue
-
-        parsed_scope, parsed_fmt, parsed_fmt_short = parse_dataset(dataset)
-
         updated = False
 
-        if scope_missing and parsed_scope is not None:
-            df.at[idx, "scope"] = parsed_scope
-            updated = True
+        dataset = df.at[idx, "dataset"] if "dataset" in df.columns else None
 
-        if fmt_missing and parsed_fmt is not None:
-            df.at[idx, "dataset_format"] = parsed_fmt
-            updated = True
+        # ---- Fix missing dataset-derived fields ----
+        if isinstance(dataset, str):
 
-        if fmt_short_missing and parsed_fmt_short is not None:
-            df.at[idx, "dataset_format_short"] = parsed_fmt_short
-            updated = True
+            scope_missing = is_missing(df.at[idx, "scope"]) if "scope" in df.columns else False
+            fmt_missing = is_missing(df.at[idx, "dataset_format"]) if "dataset_format" in df.columns else False
+            fmt_short_missing = is_missing(df.at[idx, "dataset_format_short"]) if "dataset_format_short" in df.columns else False
+
+            if scope_missing or fmt_missing or fmt_short_missing:
+                parsed_scope, parsed_fmt, parsed_fmt_short = parse_dataset(dataset)
+
+                if scope_missing and parsed_scope is not None:
+                    df.at[idx, "scope"] = parsed_scope
+                    updated = True
+
+                if fmt_missing and parsed_fmt is not None:
+                    df.at[idx, "dataset_format"] = parsed_fmt
+                    updated = True
+
+                if fmt_short_missing and parsed_fmt_short is not None:
+                    df.at[idx, "dataset_format_short"] = parsed_fmt_short
+                    updated = True
+
+        # ---- Normalize task_type ----
+        if "task_type" in df.columns:
+            val = df.at[idx, "task_type"]
+
+            # do NOT touch "None"
+            if isinstance(val, str) and val not in ("", "None"):
+                new_val = normalize_task_type(val)
+                if new_val != val:
+                    df.at[idx, "task_type"] = new_val
+                    updated = True
 
         if updated:
             rows_updated += 1
@@ -123,7 +148,7 @@ def fill(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Fix missing scope/dataset_format/dataset_format_short without touching other columns."
+        description="Fix missing dataset fields and normalize task_type safely."
     )
 
     parser.add_argument("--input", required=True)
@@ -144,12 +169,12 @@ def main():
     if not args.inplace and not args.output:
         raise ValueError("Provide --output or use --inplace")
 
-    # IMPORTANT: preserve "None" exactly
+    # CRITICAL: preserve "None" exactly
     df = pd.read_csv(
         input_path,
-        keep_default_na=False,   # <- critical
-        na_values=[],            # <- critical
-        dtype=str                # <- avoid type coercion
+        keep_default_na=False,
+        na_values=[],
+        dtype=str
     )
 
     df, updated = fill(df)
