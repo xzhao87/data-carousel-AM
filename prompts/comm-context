@@ -1,0 +1,60 @@
+A) What is the repo data-carousel-AM intended to do ?
+- It's a small ATLAS data staging analysis workflow that pulls two data sources, enriches dataset names.
+- On one side, it retrieves data carousel recall history from ATLAS OpenSearch (the atlas_datacarousel-* indices)
+- On another side, it queries the DEFT DB in CERN Oracle for production request metadata
+- The intended flow is: fetch logs from OpenSearch, enrich them using the DatasetParsing module, analyze them in a notebook, then merge in DEFT request from Oracle.
+
+A.1) Recent upgrade of the data-carousel-AM repo: 
+- it's upgraded to use the new format of the documents in OpenSearch. The new document format contains more information (e.g. task_id, task_group,
+dataset size etc) than the previous documents, which allows us to not rely on the DEFT part anymore. We can ignore the DEFT part now.
+- A new script @fetch_datacarousel_csv.py is created: check out its comments for more details
+
+A.2) What are in the new csv file (e.g. @data-carousel-AM/data/prodsyslogs.csv)
+- source_tape is the name of the tape site that the recall request was sent to, i.e. where the dataset was recalled from
+- source_rse is the name of the Rucio Storage Resource (RSE), because some sites put real data and Monte Carlo (MC) data on different RSEs, conventionally ATLAS
+tape sites create a XXX_DATATAPE RSE to store real data, and a XXX_MCTAPE RSE to store MC data, e.g. IN2P3-CC_MCTAPE vs IN2P3-CC_DATATAPE (here IN2P3-CC is the
+name of the ATLAS Tier-1 site)
+- destination_rse is where the recalled dataset is sent to, usually a _DATADISK RSE, ie. disk storage where ATLAS jobs can read directly as inputs
+- timeEvent is when the recall request was sent (to Rucio) by Data Carousel in PanDA (UTC)
+- dataset is the name of the dataset to recall
+- total_files is the total number of files in the dataset
+- dataset_size is the total size of the dataset (bytes), usually we convert them to GB (not GiB!)
+- task_id is the ID of the task that requests this dataset as input
+- task_type refers to whether the task is for managed production or user analysis 
+- task_group is the physics group of the task
+- task_user is the PanDA user name who triggers creation of the task
+- ddm_rule_id is the ID of the Rucio Rule that Rucio creates for the staging request of this dataset
+- scope : name of scope of the dataset 
+- dataset_format: exact ATLAS dataset data type (AOD, EVNT, DAOD_PHYS, etc)
+- dataset_format_short: normalized/grouped version of the format, used to reduce category fragmentation (e.g. all DAOD_* --> DAOD)
+- to_pin : =1, true, means to pin the dataset after recalled, =0 means still to be recalled, which is what we need here
+- dataset_origin : Monte Carlo (mc) or real data (data)
+- runNumber|datasetID : runNumber (for data) or dataset id (for MC)
+- physicsShort|StreamName: stream Name (for data) or physicsShort description (for mc)
+- production_step : e.g. "merge" for merging small outputs, or "recon" for reconstruction step
+- dataset_origin : is this a real dataset (data) or Monte Carlo dataset (mc)
+- dataset_category : standard, meaning ? 
+- versionTag: the version Tag part of the dataset name nomenclature, composed of amiTag and task id
+- amiTag : the ami tag part of the version tag
+- tid : is the task id part of the version tag, here the task refers to the panda task that produced this dataset as output in the past
+- full_tid : is the complete task id, including the sub-task sequential numbers 
+- method: internal function call of the panda JEDI that corresponds to this OpenSearch entry, "stage_request" means sending the staging request,
+  which is exactly the time stamp we want to collect when studying the recall history
+
+A.3) Between the old and new format of the OpenSearch data carousel records, there is the following mappings of the column names:
+    old vs new
+- resource vs source_tape
+- files vs total_files
+- asctime vs timeEvent
+- datamc vs dataset_origin
+- dataType vs dataset_format_short
+- productionStep vs production_step
+
+Other columns not mentioned in the above list are either with the same name or only available in one csv file
+
+B) What is the arcmeta repo for ?
+- this repo is to analyze the recall history csv file that is produced by the data-carousel-AM package.
+- read through the @arcmeta/README.md file to understand what scripts are available to use in this repo.
+
+
+

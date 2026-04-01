@@ -1,0 +1,35 @@
+--context
+
+Check out the @comm-context for general background of the archival metadata project, where the
+data-carousel-AM package is meant to collect the recall history, along with all the metadata,
+and the arcmeta package consists of scripts used to analyze the data, calculate entropy of metadata
+fields etc.
+
+--task A: there is the @data-carousel-AM/data/prodsyslogs.csv file with recall history info,
+create a script that will do the following:
+1) take input csv file with "-f" command line option, which in this case would be the @data-carousel-AM/data/prodsyslogs.csv file
+2) scan the "-f" input csv file, for all rows matching "data_format_short"=="RAW" and "data_origin"=="data", write the rows to a
+new data-carousel-AM/data/new-RAW.csv
+3) scan the "-f" input csv file, for all rows matching "data_format_short"=="AOD" and "data_origin"=="data", write the rows to a
+new data-carousel-AM/data/new-data-AOD.csv
+4) scan the "-f" input csv file, for all rows matching "data_format_short"=="AOD" and "data_origin"=="mc", write the rows to a
+new data-carousel-AM/data/new-mc-AOD.csv
+5) scan the "-f" input csv file, for all rows matching "data_format_short"=="HITS" and "data_origin"=="mc", write the rows to a
+new data-carousel-AM/data/new-mc-HITS.csv
+6) scan the "-f" input csv file, for all rows already selected by the above 1)~5) steps, drop them, write the remaining rows to
+a new data-carousel-AM/data/others.csv
+7) for the above 6 new csv files generated from the above 1)~6) steps, split each of them into two, one with "task_type"=="production",
+named <original csv filename>-production.csv; another with "task_type"=="analysis", named <original csv filename>-analysis.csv.
+
+Totally 18 new csv files to be generated from the "-f" file. 
+
+--task B: extend the analysis to include the more recent recall history with the new csv format
+
+- the current arcmeta scripts are designed to use the old csv format, refer to the @comm-context
+for a comparing table mapping the colume names between the old and new csv files.
+- change the arcmeta scripts so that they work for both old and new formats, automatically switch
+between the formats based on what's in the specified csv file. For example, if a script is to
+count the number of datasets recalled within the same day based on "asctime" column in the old
+csv, change the script so that the script will know that "asctime" and "dataset_format_short" are
+exchangable so that the script automatically covers the different names across input csv files.
+
