@@ -16,13 +16,21 @@ Provide connection details in config.ini (see config.example.ini).
 
 ## 2. Fetch logs from OpenSearch
 
+This creates a CSV file (e.g., data/prodsyslogs.csv) containing flattened logs.
+Service columns are removed, and dataset names are parsed into additional fields.
+
+### 2.1. old way (when DC was in ProdSys2)
 Run:
 
 ```python scripts/get_prodsyslogs.py```
 
+### 2.2. new way (after DC is moved to PanDA)
+Run:
 
-This creates a CSV file (e.g., data/prodsyslogs.csv) containing flattened logs.
-Service columns are removed, and dataset names are parsed into additional fields.
+```python scripts/fetch_datacarousel_csv.py```
+
+(For doc, see inline comments ```less scripts/fetch_datacarousel_csv.py```)
+
 
 ## 3. Analyze logs
 

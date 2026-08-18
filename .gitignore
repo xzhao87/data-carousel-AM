@@ -32,3 +32,6 @@ config.ini
 # Testing / typing
 .pytest_cache/
 .mypy_cache/
+
+# older version
+*~
