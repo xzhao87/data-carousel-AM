@@ -2,7 +2,7 @@
 
 ## 1. Prepare Environment
 
-Install Python dependencies:
+Install Python dependencies (minimum dependent packages needed by retriving data from CERN OpenSearch):
 
 ```pip install -r requirements.txt```
 
@@ -12,7 +12,14 @@ Create a local data/ directory:
 ```mkdir -p data```
 
 
-Provide connection details in config.ini (see config.example.ini).
+Provide connection details in config.ini (see config.example.ini -- can leave the [database] section off, which is
+for connecting to the ATLAS DEFT DB).
+
+Run a script to pull kerberose ticket from CERN to local, and set the following env variable:
+```
+export KRB5CCNAME=FILE:/tmp/<cern krb5>/krb5cc
+```
+by following the pull script stdout. This env variable points to valid KRB5 ticket to authenticate to CERN OpenSearch. 
 
 ## 2. Fetch logs from OpenSearch
 
